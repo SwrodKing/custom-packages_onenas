@@ -69,7 +69,7 @@ jobs:
             fi
           done
           for ver in public/${LINK_VERSIONS}; do
-            ln -s public/${FEED_VERSION} ${ver}
+            ln -s public/${FEED_VERSION} public/${ver}
             echo "Created symbolic link: ${ver} -> ${FEED_VERSION}"
           done
           mkdir -p public/.stfolder
