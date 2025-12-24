@@ -68,11 +68,12 @@ jobs:
               )
             fi
           done
-          for ver in public/${LINK_VERSIONS}; do
+          cd public
+          for ver in ${LINK_VERSIONS}; do
             ln -s ${FEED_VERSION} ${ver}
             echo "Created symbolic link: ${ver} -> ${FEED_VERSION}"
           done
-          mkdir -p public/.stfolder
+          mkdir -p .stfolder
 
       - name: Sync feeds to self-hosted server
         env:
