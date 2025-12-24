@@ -17,9 +17,6 @@ jobs:
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-    strategy:
-      matrix:
-        feed_version: ["24.10.4", "24.10.5"]
 
     steps:
       - uses: actions/checkout@v6
@@ -49,7 +46,8 @@ jobs:
           
       - name: Prepare feed directories
         env:
-          FEED_VERSION: ${{ matrix.feed_version }}
+          FEED_VERSION: "24.10.5"
+          LINK_VERSIONS: "24.10.4"
         run: |
           chmod +x $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh
           mkdir -p public/${FEED_VERSION}
@@ -69,6 +67,10 @@ jobs:
                 gzip -9nc Packages > Packages.gz
               )
             fi
+          done
+          for ver in public/${LINK_VERSIONS}; do
+            ln -s public/${FEED_VERSION} ${ver}
+            echo "Created symbolic link: ${ver} -> ${FEED_VERSION}"
           done
           mkdir -p public/.stfolder
 
