@@ -1,4 +1,4 @@
-name: 🗑️ One-time Repository Cleanup
+name: 🗑️ Internal Repository Cleanup
 
 on:
   workflow_dispatch: # 手动触发
@@ -6,12 +6,12 @@ on:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 显式声明写权限
     steps:
-      - name: 🔑 Checkout custom-packages repo
+      - name: 🔑 Checkout repo
         uses: actions/checkout@v6
-        with:
-          repository: OneNAS-space/custom-packages
-          token: ${{ secrets.CUSTOM_PACKAGES_TOKEN }}
+        # 无需 repository 和 token 参数，默认就是当前仓库
 
       - name: 🧹 Execute precision cleaning
         run: |
@@ -23,42 +23,38 @@ jobs:
           ARCHS=("aarch64_cortex-a53" "arm_cortex-a7_neon-vfpv4" "x86_64")
 
           for ver in "${VERSIONS[@]}"; do
-            # 1. 处理架构目录：只保留指定的三个包
+            # 1. 架构目录白名单策略
             for arch in "${ARCHS[@]}"; do
               dir="$ver/$arch"
               if [ -d "$dir" ]; then
                 echo "Reviewing $dir..."
-                # 使用 find 删除不匹配指定模式的文件
-                # ! -name 表示取反（不匹配则删除）
+                # 只保留这三种前缀的包
                 find "$dir" -type f \
                   ! -name "natmapt*" \
                   ! -name "stuntman-client*" \
                   ! -name "vlmcsd*" \
                   -delete
-                echo "✅ Cleaned $dir"
               fi
             done
 
-            # 2. 处理 common 目录：只删除 ca-bundle 和 ca-certificates
+            # 2. Common 目录黑名单策略
             common_dir="$ver/common"
             if [ -d "$common_dir" ]; then
               echo "Reviewing $common_dir..."
               find "$common_dir" -type f \( -name "ca-bundle*" -o -name "ca-certificates*" \) -delete
-              echo "✅ Cleaned $common_dir"
             fi
           done
 
-      - name: 🚀 Commit and Push changes
+      - name: 🚀 Commit and Push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           git add .
           
-          # 检查是否有文件被删除
           if git diff --cached --quiet; then
-            echo "No junk files found. Repo is already clean."
+            echo "Everything is already clean."
           else
-            git commit -m "🗑️ Cleanup: Remove redundant packages, keep core binaries"
-            git push origin main
+            git commit -m "🗑️ Cleanup: Standardize package repository"
+            git push origin HEAD:${{ github.ref_name }}
           fi
