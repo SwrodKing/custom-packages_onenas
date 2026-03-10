@@ -46,11 +46,19 @@ jobs:
           # 编译 apk-tools v3 (静态链接以避免库文件路径问题)
           git clone --depth 1 https://gitlab.alpinelinux.org/alpine/apk-tools.git
           cd apk-tools
-          # 放弃 LDFLAGS="-static"，改为标准编译
-          make
-          # 使用官方 install 脚本，它会处理好 .so 和二进制文件的位置
-          sudo make install
+          # 只编译 src 目录下的核心程序和库，不触发 doc 目录的编译
+          make src/
+          
+          # 手动执行安装逻辑（模仿 make install 但跳过 doc）
+          sudo install -d /usr/local/sbin
+          sudo install src/apk /usr/local/sbin/apk
+          sudo install -d /usr/local/lib
+          sudo install src/libapk.so.3.0.0 /usr/local/lib/
+          sudo ln -sf /usr/local/lib/libapk.so.3.0.0 /usr/local/lib/libapk.so.3
+          sudo ln -sf /usr/local/lib/libapk.so.3.0.0 /usr/local/lib/libapk.so
           cd ..
+          
+          # 3. 刷新动态库缓存
           sudo ldconfig
 
       - name: Restore signing key
