@@ -47,7 +47,7 @@ jobs:
           git clone --depth 1 https://gitlab.alpinelinux.org/alpine/apk-tools.git
           cd apk-tools
           # 只编译 src 目录下的核心程序和库，不触发 doc 目录的编译
-          make src/
+          make src/apk
           
           # 手动执行安装逻辑（模仿 make install 但跳过 doc）
           sudo install -d /usr/local/sbin
