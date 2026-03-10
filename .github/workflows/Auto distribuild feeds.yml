@@ -46,8 +46,8 @@ jobs:
           # 编译 apk-tools v3 (静态链接以避免库文件路径问题)
           git clone --depth 1 https://gitlab.alpinelinux.org/alpine/apk-tools.git
           cd apk-tools
-          # 只编译 src 目录下的核心程序和库，不触发 doc 目录的编译
-          make src/apk
+          make -C libfetch
+          make -C src apk VERSION="3.0.0"
           
           # 手动执行安装逻辑（模仿 make install 但跳过 doc）
           sudo install -d /usr/local/sbin
