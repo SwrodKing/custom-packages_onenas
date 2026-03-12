@@ -61,69 +61,89 @@ jobs:
       - name: 📦 Process Feeds (Dual Engine)
         run: |
           set -e
-          mkdir -p public/24.10 public/25.12
+          mkdir -p public/releases
 
-          # --- Engine A: OpenWrt 24.10 (Legacy IPK) ---
-          if [ -d "24.10" ]; then
-            echo "✨ Processing 24.10 IPK feeds..."
-            for arch_path in $(ls -d 24.10/*/ 2>/dev/null); do
-              arch=$(basename "$arch_path")
-              dest="public/24.10/$arch"
-              mkdir -p "$dest"
-              cp 24.10/$arch/*.ipk "$dest/" 2>/dev/null || true
-              
-              if [ "$(ls -A "$dest"/*.ipk 2>/dev/null)" ]; then
+          # 1. 首先物理生成逻辑通用的索引 (luci 和 common)
+          # 这样我们只需要生成一次，其他架构直接链接过来即可
+          for ver in "24.10" "25.12"; do
+            for group in "luci" "common"; do
+              src_path="releases/packages-$ver/$group/packages"
+              if [ -d "$src_path" ] && [ "$(ls -A "$src_path" 2>/dev/null)" ]; then
+                echo "📝 Indexing Global $group for $ver..."
                 (
-                  cd "$dest"
-                  echo "📝 Generating IPK index for $arch"
-                  chmod +x $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh
+                  cd "$src_path"
+                  if [[ "$ver" == "25.12" ]]; then
+                    apk mkndx --allow-untrusted --output packages.adb *.apk
+                    usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
+                  else
+                    chmod +x $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh
+                    $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
+                    usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
+                    gzip -9nc Packages > Packages.gz
+                  fi
+                )
+                # 物理同步到 public 的公共位置
+                mkdir -p "public/releases/packages-$ver/$group"
+                rsync -av "$src_path/" "public/releases/packages-$ver/$group/packages/"
+              fi
+            done
+          done
+
+          # 2. 处理硬件架构目录并创建软链接
+          for ver in "24.10" "25.12"; do
+            if [ ! -d "releases/packages-$ver" ]; then continue; fi
+            
+            for arch_path in $(ls -d releases/packages-$ver/*/ 2>/dev/null); do
+              arch=$(basename "$arch_path")
+              # 跳过逻辑目录
+              if [[ "$arch" == "luci" || "$arch" == "common" ]]; then continue; fi
+              
+              DEST_BASE="public/releases/packages-$ver/$arch/packages"
+              mkdir -p "$DEST_BASE"
+              
+              # A. 物理同步架构特有包并生成索引
+              rsync -av "releases/packages-$ver/$arch/packages/" "$DEST_BASE/"
+              (
+                cd "$DEST_BASE"
+                echo "📝 Indexing Arch-specific: $ver -> $arch"
+                if [[ "$ver" == "25.12" ]]; then
+                  apk mkndx --allow-untrusted --output packages.adb *.apk
+                  usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
+                else
                   $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
                   usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
                   gzip -9nc Packages > Packages.gz
-                )
-              fi
+                fi
+              )
+
+              # B. 创建指向通用目录的软链接 (核心需求)
+              # 路径：public/releases/packages-24.10/x86_64/packages/luci -> ../../../luci/packages
+              ln -snf "../../../luci/packages" "$DEST_BASE/luci"
+              ln -snf "../../../common/packages" "$DEST_BASE/common"
             done
-          fi
-
-          # --- Engine B: OpenWrt 25.12 (Modern APK v3) ---
-          if [ -d "25.12" ]; then
-            echo "✨ Processing 25.12 APK feeds..."
-            for arch_path in $(ls -d 25.12/*/ 2>/dev/null); do
-              arch=$(basename "$arch_path")
-              dest="public/25.12/$arch"
-              mkdir -p "$dest"
-              cp 25.12/$arch/*.apk "$dest/" 2>/dev/null || true
-              
-              if [ "$(ls -A "$dest"/*.apk 2>/dev/null)" ]; then
-                (
-                  cd "$dest"
-                  echo "📦 Generating APK ADB index for $arch"
-                  # 使用我们编译的 apk-tools v3
-                  apk mkndx --allow-untrusted --output packages.adb *.apk
-                  # 签发 .asc 签名
-                  usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
-                  echo "✅ $arch APK index done."
-                )
-              fi
-            done
-          fi
-          
-          cd public
-          LINK_VERSIONS="24.10.4 24.10.5"
-
-          for ver in ${LINK_VERSIONS}; do
-            echo "Processing link: ${ver} -> 24.10"
-            
-            if [ -d "${ver}" ] && [ ! -L "${ver}" ]; then
-              echo "Warning: ${ver} is a real directory, removing it to create link."
-              rm -rf "${ver}"
-            fi
-
-            ln -snf 24.10 "${ver}"
           done
+                    
+          # A. 处理版本级的映射 (在 releases 目录内)
+          cd public/releases
+          echo "🔗 Creating Version-level symlinks..."
+          # releases/packages-24.10.5 -> packages-24.10
+          ln -snf packages-24.10 packages-24.10.5
+          # releases/packages-25.12.0 -> packages-25.12
+          ln -snf packages-25.12 packages-25.12.0
 
-          echo "Current symbolic links:"
-          ls -ld 24.10*
+          # B. 处理“无前缀”版本目录到“packages-”物理目录的映射
+          # 目标：releases/24.10.5/packages -> ../packages-24.10
+          echo "🔗 Creating Router-friendly path symlinks..."
+          
+          mkdir -p 24.10.5 25.12.0
+          ln -snf ../packages-24.10 24.10.5/packages
+          ln -snf ../packages-25.12 25.12.0/packages
+          
+          cd ../.. # 回到根目录
+
+          # 3. (可选) 验证链接是否正确
+          echo "🔍 Verifying structure..."
+          ls -R public/releases
           mkdir -p .stfolder
 
       - name: Sync feeds to self-hosted server
