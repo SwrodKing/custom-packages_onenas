@@ -110,6 +110,7 @@ jobs:
                   apk mkndx --allow-untrusted --output packages.adb *.apk
                   usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
                 else
+                  chmod +x $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh
                   $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
                   usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
                   gzip -9nc Packages > Packages.gz
