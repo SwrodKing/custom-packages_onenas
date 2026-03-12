@@ -63,57 +63,58 @@ jobs:
           set -e
           mkdir -p public/releases
 
-          # === 第一阶段：物理同步与索引生成 (处理所有目录) ===
+          # === 第一阶段：1:1 物理镜像同步并生成索引 ===
           for ver in "24.10" "25.12"; do
             PHYS_ROOT="releases/packages-$ver"
             [ ! -d "$PHYS_ROOT" ] && continue
             
-            echo "📂 Processing Release: $ver"
+            echo "📂 Mirroring Release: $ver"
             
-            # 遍历该版本下的所有物理子目录 (aarch64, x86_64, luci, common)
+            # 遍历该版本下的所有子目录 (luci, common, x86_64 等)
             for sub_dir_path in $(ls -d $PHYS_ROOT/*/ 2>/dev/null); do
               sub_dir=$(basename "$sub_dir_path")
-              src_pkg_dir="$sub_dir_path/packages"
-              dest_pkg_dir="public/releases/packages-$ver/$sub_dir/packages"
+              dest_dir="public/releases/packages-$ver/$sub_dir"
               
-              if [ -d "$src_pkg_dir" ]; then
-                echo "🚀 Synchronizing and Indexing: $ver -> $sub_dir"
-                mkdir -p "$dest_pkg_dir"
-                
-                # 1. 物理同步文件 (保证 luci/common 的文件被拷入 public)
-                rsync -rlptD "$src_pkg_dir/" "$dest_pkg_dir/"
-                
-                # 2. 在 public 目录下生成索引和签名
-                (
-                  cd "$dest_pkg_dir"
+              echo "🚀 Syncing $sub_dir to $dest_dir"
+              mkdir -p "$dest_dir"
+              
+              # 1:1 同步所有内容 (保留原有结构)
+              rsync -rlptD "$sub_dir_path/" "$dest_dir/"
+              
+              # 寻找该目录下真正存放 .apk/.ipk 的地方生成索引
+              # 如果是架构目录，包在 packages/ 下；如果是 luci/common，包就在根下
+              target_pkg_dir="$dest_dir"
+              [ -d "$dest_dir/packages" ] && target_pkg_dir="$dest_dir/packages"
+
+              (
+                cd "$target_pkg_dir"
+                if [ "$(ls -A *.apk *.ipk 2>/dev/null)" ]; then
+                  echo "📝 Indexing in $target_pkg_dir"
                   if [[ "$ver" == "25.12" ]]; then
-                    echo "📦 Running apk mkndx..."
                     apk mkndx --allow-untrusted --output packages.adb *.apk
                     usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
                   else
-                    echo "📝 Running ipkg-make-index..."
                     chmod +x $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh
                     $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
                     usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
                     gzip -9nc Packages > Packages.gz
                   fi
-                )
-              fi
+                fi
+              )
             done
           done
 
-          # === 第二阶段：架构关联 (建立软链接) ===
+          # === 第二阶段：创建软链接 (架构目录 -> 通用目录) ===
           for ver in "24.10" "25.12"; do
-            VER_PUB_ROOT="public/releases/packages-$ver"
-            [ ! -d "$VER_PUB_ROOT" ] && continue
-            
-            for arch_path in $(ls -d $VER_PUB_ROOT/*/ 2>/dev/null); do
+            VER_PUB="public/releases/packages-$ver"
+            [ ! -d "$VER_PUB" ] && continue
+            for arch_path in $(ls -d $VER_PUB/*/ 2>/dev/null); do
               arch=$(basename "$arch_path")
-              # 如果是硬件架构目录，则创建指向同级 luci/common 的链接
-              if [[ "$arch" != "luci" && "$arch" != "common" ]]; then
+              # 只有架构目录（里面有 packages 文件夹的）才需要创建链接
+              if [ -d "$arch_path/packages" ]; then
                 echo "🔗 Linking $arch -> luci & common"
-                ln -snf "../../luci" "$arch_path/luci"
-                ln -snf "../../common" "$arch_path/common"
+                ln -snf "../luci" "$arch_path/luci"
+                ln -snf "../common" "$arch_path/common"
               fi
             done
           done
