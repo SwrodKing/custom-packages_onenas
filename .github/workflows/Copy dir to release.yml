@@ -1,0 +1,44 @@
+name: 🚚 Internal Directory Migration (rsync test)
+
+on:
+  workflow_dispatch: # 手动触发
+
+jobs:
+  rsync-move:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 🛠️ Execute Rsync Migration
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+          # 创建 releases 父目录
+          mkdir -p releases/packages-24.10
+          mkdir -p releases/packages-25.12
+
+          # 1. 使用 rsync 同步 24.10
+          # 注意：源目录后的 / 非常关键，代表同步目录下的内容
+          if [ -d "24.10" ]; then
+            echo "Syncing 24.10 to releases/packages-24.10..."
+            rsync -av 24.10/ releases/packages-24.10/
+          fi
+
+          # 2. 使用 rsync 同步 25.12
+          if [ -d "25.12" ]; then
+            echo "Syncing 25.12 to releases/packages-25.12..."
+            rsync -av 25.12/ releases/packages-25.12/
+          fi
+
+          # 3. 提交新目录
+          # 此时 24.10 和 25.12 依然存在于根目录
+          git add releases/
+          git commit -m "chore: sync packages to releases/ subfolder via rsync" || echo "No changes to commit"
+          git push origin main
