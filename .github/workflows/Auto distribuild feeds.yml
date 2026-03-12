@@ -118,9 +118,12 @@ jobs:
               )
 
               # B. 创建指向通用目录的软链接 (核心需求)
-              # 路径：public/releases/packages-24.10/x86_64/packages/luci -> ../../../luci/packages
-              ln -snf "../../../luci/packages" "$DEST_BASE/luci"
-              ln -snf "../../../common/packages" "$DEST_BASE/common"
+              # 路径：public/releases/packages-24.10/x86_64/luci -> ../../luci/packages
+              ARCH_ROOT="public/releases/packages-$ver/$arch"
+              
+              echo "🔗 Linking common feeds for $arch..."
+              ln -snf "../../luci" "$ARCH_ROOT/luci"
+              ln -snf "../../common" "$ARCH_ROOT/common"
             done
           done
                     
