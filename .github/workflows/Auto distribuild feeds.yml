@@ -63,15 +63,27 @@ jobs:
           set -e
           mkdir -p public/releases
 
-          # 1. 首先物理生成逻辑通用的索引 (luci 和 common)
-          # 这样我们只需要生成一次，其他架构直接链接过来即可
+          # 1. 第一步：完整同步所有物理目录并生成索引 (luci, common, 以及各架构)
+          # 物理路径格式：releases/packages-$ver/$dir/packages
           for ver in "24.10" "25.12"; do
-            for group in "luci" "common"; do
-              src_path="releases/packages-$ver/$group/packages"
-              if [ -d "$src_path" ] && [ "$(ls -A "$src_path" 2>/dev/null)" ]; then
-                echo "📝 Indexing Global $group for $ver..."
+            if [ ! -d "releases/packages-$ver" ]; then continue; fi
+            
+            # 遍历所有子目录（包括 luci, common 和 x86_64 等）
+            for dir_path in $(ls -d releases/packages-$ver/*/ 2>/dev/null); do
+              dir_name=$(basename "$dir_path")
+              phys_src="releases/packages-$ver/$dir_name/packages"
+              phys_dest="public/releases/packages-$ver/$dir_name/packages"
+              
+              if [ -d "$phys_src" ] && [ "$(ls -A "$phys_src" 2>/dev/null)" ]; then
+                echo "📝 Processing Physical: $ver -> $dir_name"
+                mkdir -p "$phys_dest"
+                
+                # 同步物理文件
+                rsync -rl "$phys_src/" "$phys_dest/"
+                
+                # 在物理目的地生成索引
                 (
-                  cd "$src_path"
+                  cd "$phys_dest"
                   if [[ "$ver" == "25.12" ]]; then
                     apk mkndx --allow-untrusted --output packages.adb *.apk
                     usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
@@ -82,48 +94,24 @@ jobs:
                     gzip -9nc Packages > Packages.gz
                   fi
                 )
-                # 物理同步到 public 的公共位置
-                mkdir -p "public/releases/packages-$ver/$group"
-                rsync -av "$src_path/" "public/releases/packages-$ver/$group/packages/"
               fi
             done
           done
 
-          # 2. 处理硬件架构目录并创建软链接
+          # 2. 第二步：建立架构目录下的软链接 (luci 和 common)
+          # 目标：public/releases/packages-$ver/$arch/luci -> ../../luci
           for ver in "24.10" "25.12"; do
-            if [ ! -d "releases/packages-$ver" ]; then continue; fi
+            if [ ! -d "public/releases/packages-$ver" ]; then continue; fi
             
-            for arch_path in $(ls -d releases/packages-$ver/*/ 2>/dev/null); do
+            for arch_path in $(ls -d public/releases/packages-$ver/*/ 2>/dev/null); do
               arch=$(basename "$arch_path")
-              # 跳过逻辑目录
-              if [[ "$arch" == "luci" || "$arch" == "common" ]]; then continue; fi
-              
-              DEST_BASE="public/releases/packages-$ver/$arch/packages"
-              mkdir -p "$DEST_BASE"
-              
-              # A. 物理同步架构特有包并生成索引
-              rsync -av "releases/packages-$ver/$arch/packages/" "$DEST_BASE/"
-              (
-                cd "$DEST_BASE"
-                echo "📝 Indexing Arch-specific: $ver -> $arch"
-                if [[ "$ver" == "25.12" ]]; then
-                  apk mkndx --allow-untrusted --output packages.adb *.apk
-                  usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
-                else
-                  chmod +x $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh
-                  $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
-                  usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
-                  gzip -9nc Packages > Packages.gz
-                fi
-              )
-
-              # B. 创建指向通用目录的软链接 (核心需求)
-              # 路径：public/releases/packages-24.10/x86_64/luci -> ../../luci/packages
-              ARCH_ROOT="public/releases/packages-$ver/$arch"
-              
-              echo "🔗 Linking common feeds for $arch..."
-              ln -snf "../../luci" "$ARCH_ROOT/luci"
-              ln -snf "../../common" "$ARCH_ROOT/common"
+              # 只有真正的硬件架构目录才需要创建链接，跳过 luci/common 本身
+              if [[ "$arch" != "luci" && "$arch" != "common" ]]; then
+                echo "🔗 Linking Generic Feeds into $arch..."
+                # 确保在架构根目录下创建链接
+                ln -snf "../../luci" "public/releases/packages-$ver/$arch/luci"
+                ln -snf "../../common" "public/releases/packages-$ver/$arch/common"
+              fi
             done
           done
                     
