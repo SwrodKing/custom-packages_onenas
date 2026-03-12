@@ -1,10 +1,10 @@
-name: 🚚 Internal Directory Migration (rsync test)
+name: 📂 Restructure Releases Subdirectories
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 jobs:
-  rsync-move:
+  restructure:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -12,33 +12,39 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: 🛠️ Execute Rsync Migration
+      - name: 🛠️ Execute Restructuring
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
 
-          # 创建 releases 父目录
-          mkdir -p releases/packages-24.10
-          mkdir -p releases/packages-25.12
+          # 定义需要处理的版本和架构
+          VERSIONS=("packages-24.10" "packages-25.12")
+          ARCHS=("aarch64_cortex-a53" "arm_cortex-a7_neon-vfpv4" "x86_64")
 
-          # 1. 使用 rsync 同步 24.10
-          # 注意：源目录后的 / 非常关键，代表同步目录下的内容
-          if [ -d "24.10" ]; then
-            echo "Syncing 24.10 to releases/packages-24.10..."
-            rsync -av 24.10/ releases/packages-24.10/
-          fi
+          for ver in "${VERSIONS[@]}"; do
+            for arch in "${ARCHS[@]}"; do
+              BASE_PATH="releases/$ver/$arch"
+              
+              if [ -d "$BASE_PATH" ]; then
+                echo "Processing $BASE_PATH..."
+                
+                # 1. 创建临时的 packages 目录
+                mkdir -p "$BASE_PATH/packages_tmp"
+                
+                # 2. 将当前架构目录下的所有文件（不包括新创建的 tmp 目录本身）移入 tmp
+                # 使用 find 排除目录本身，只移动文件和文件夹
+                find "$BASE_PATH" -maxdepth 1 -not -path "$BASE_PATH" -not -path "$BASE_PATH/packages_tmp" -exec mv {} "$BASE_PATH/packages_tmp/" \;
+                
+                # 3. 重命名临时目录为 packages
+                mv "$BASE_PATH/packages_tmp" "$BASE_PATH/packages"
+                
+                echo "✅ $BASE_PATH restructure complete."
+              fi
+            done
+          done
 
-          # 2. 使用 rsync 同步 25.12
-          if [ -d "25.12" ]; then
-            echo "Syncing 25.12 to releases/packages-25.12..."
-            rsync -av 25.12/ releases/packages-25.12/
-          fi
-
-          # 3. 提交新目录
-          # 此时 24.10 和 25.12 依然存在于根目录
+          # 提交更改
           git add releases/
-          git commit -m "chore: sync packages to releases/ subfolder via rsync" || echo "No changes to commit"
+          git commit -m "refactor: add 'packages' subdirectory level for each arch" || echo "No changes to commit"
           git push origin main
