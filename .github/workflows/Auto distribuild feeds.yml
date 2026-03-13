@@ -58,28 +58,30 @@ jobs:
           echo "${{ secrets.FEED_SIGNING_KEY }}" | base64 -d > key-build
           chmod 600 key-build
           
-      - name: 📦 Process Feeds (Shadow Indexing Strategy - Fixed)
+      - name: 📦 Process Feeds (Optimized Shadow Indexing)
         run: |
           set -e
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
           mkdir -p public/releases
 
-          # === 第一阶段：物理同步主仓库 (luci/common) ===
+          # === 第一阶段：物理同步并生成“原始”索引 ===
           for ver in "24.10" "25.12"; do
-            [ ! -d "releases/packages-$ver" ] && continue
-            for group in "luci" "common"; do
-              src_dir="releases/packages-$ver/$group"
-              dest_dir="public/releases/packages-$ver/$group"
-              [ ! -d "$src_dir" ] && continue
-              
-              echo "🚀 Mirroring Global Feed: $ver/$group"
+            PHYS_ROOT="releases/packages-$ver"
+            [ ! -d "$PHYS_ROOT" ] && continue
+            
+            for sub_dir_path in $(ls -d $PHYS_ROOT/*/ 2>/dev/null); do
+              sub_dir=$(basename "$sub_dir_path")
+              dest_dir="public/releases/packages-$ver/$sub_dir"
               mkdir -p "$dest_dir"
-              rsync -rlptD "$src_dir/" "$dest_dir/"
+              rsync -rlptD "$sub_dir_path/" "$dest_dir/"
               
+              target_pkg_dir="$dest_dir"
+              [ -d "$dest_dir/packages" ] && target_pkg_dir="$dest_dir/packages"
+
               (
-                cd "$dest_dir"
-                # 检查是否有 ipk 或 apk 文件
-                if ls *.ipk *.apk >/dev/null 2>&1; then
+                cd "$target_pkg_dir"
+                if [ "$(ls -A *.apk *.ipk 2>/dev/null)" ]; then
+                  echo "📝 Indexing Physical Feed: $ver/$sub_dir"
                   if [[ "$ver" == "25.12" ]]; then
                     apk mkndx --allow-untrusted --output packages.adb *.apk
                     usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
@@ -89,71 +91,43 @@ jobs:
                     usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
                     gzip -9nc Packages > Packages.gz
                   fi
-                  python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$group"
+                  # 物理目录生成原始 index.json
+                  python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$sub_dir"
                 fi
               )
             done
           done
 
-          # === 第二阶段：处理硬件架构目录并生成“影子索引” ===
+          # === 第二阶段：影子目录 (仅链接包和索引，重写 index.json) ===
           for ver in "24.10" "25.12"; do
             VER_PUB="public/releases/packages-$ver"
             [ ! -d "$VER_PUB" ] && continue
             
-            for arch_path in $(ls -d releases/packages-$ver/*/ 2>/dev/null); do
+            for arch_path in $(ls -d $VER_PUB/*/ 2>/dev/null); do
               arch=$(basename "$arch_path")
               [[ "$arch" == "luci" || "$arch" == "common" ]] && continue
               
-              echo "🏗️ Processing Architecture: $arch ($ver)"
-              
-              # A. 架构原生 packages
-              arch_dest="public/releases/packages-$ver/$arch/packages"
-              mkdir -p "$arch_dest"
-              if [ -d "$arch_path/packages" ]; then
-                rsync -rlptD "$arch_path/packages/" "$arch_dest/"
-                (
-                  cd "$arch_dest"
-                  if ls *.ipk *.apk >/dev/null 2>&1; then
-                    if [[ "$ver" == "25.12" ]]; then
-                      apk mkndx --allow-untrusted --output packages.adb *.apk
-                      usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
-                    else
-                      $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
-                      usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
-                      gzip -9nc Packages > Packages.gz
-                    fi
-                    python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$arch"
-                  fi
-                )
-              fi
-
-              # B. 影子目录 (luci/common)
               for group in "luci" "common"; do
-                global_dir="../../$group"
-                shadow_dir="public/releases/packages-$ver/$arch/$group"
+                phys_dir="$VER_PUB/$group"
+                [ ! -d "$phys_dir" ] && continue
                 
-                # 如果顶级对应的物理目录不存在，跳过
-                [ ! -d "public/releases/packages-$ver/$group" ] && continue
-                
+                shadow_dir="$VER_PUB/$arch/$group"
                 mkdir -p "$shadow_dir"
-                echo "🔗 Linking $group packages for $arch via cp -as"
                 
-                # 核心修正：使用 cp -as 创建软链接镜像，避免通配符报错
-                # 这会将 ../../luci/ 下的所有文件在 shadow_dir 下建立同名软链接
-                cp -as "$(realpath --relative-to="$shadow_dir" "public/releases/packages-$ver/$group")"/* "$shadow_dir/" 2>/dev/null || true
+                echo "🔗 Linking $group assets into $arch shadow directory"
+                # 1. 链接包文件 (*.ipk / *.apk)
+                ln -snf "../../$group"/*.{ipk,apk} "$shadow_dir/" 2>/dev/null || true
                 
+                # 2. 关键：链接已生成的索引和签名文件 (不再重复做索引动作)
+                # 这样 opkg/apk 就能找到这些文件，且内容与主仓库一致
+                ln -snf "../../$group"/Packages* "$shadow_dir/" 2>/dev/null || true
+                ln -snf "../../$group"/packages.adb* "$shadow_dir/" 2>/dev/null || true
+                
+                # 3. 唯一需要“重做”的：生成架构特定的 index.json
                 (
                   cd "$shadow_dir"
-                  # 再次确认链接是否成功建立
-                  if ls *.ipk *.apk >/dev/null 2>&1; then
-                    if [[ "$ver" == "25.12" ]]; then
-                      apk mkndx --allow-untrusted --output packages.adb *.apk
-                      usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
-                    else
-                      $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
-                      usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
-                      gzip -9nc Packages > Packages.gz
-                    fi
+                  if [ "$(ls -L -A *.apk *.ipk 2>/dev/null)" ]; then
+                    echo "📝 Generating specialized index.json for $arch/$group"
                     python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$arch"
                   fi
                 )
@@ -161,7 +135,7 @@ jobs:
             done
           done
 
-          # === 第三阶段：别名与映射 ===
+          # === 第三阶段：收尾 (保持原样) ===
           cd public/releases
           ln -snf packages-24.10 packages-24.10.5
           ln -snf packages-25.12 packages-25.12.0
@@ -170,7 +144,7 @@ jobs:
           ln -snf ../packages-25.12 25.12.0/packages
           
           cd ../..
-          echo "✅ Process finished successfully."
+          echo "✅ Optimized process finished."
           mkdir -p .stfolder
 
       - name: Sync feeds to self-hosted server
