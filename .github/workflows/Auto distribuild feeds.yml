@@ -58,28 +58,30 @@ jobs:
           echo "${{ secrets.FEED_SIGNING_KEY }}" | base64 -d > key-build
           chmod 600 key-build
           
-      - name: 📦 Process Feeds (Optimized Shadow Indexing)
+      - name: 📦 Process Feeds (Final Corrected Structure)
         run: |
           set -e
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
           mkdir -p public/releases
 
-          # === 第一阶段：物理同步并生成“原始”索引 ===
+          # === 第一阶段：物理同步并生成“原始”索引 (luci, common, arch/packages) ===
           for ver in "24.10" "25.12"; do
             PHYS_ROOT="releases/packages-$ver"
             [ ! -d "$PHYS_ROOT" ] && continue
             
             for sub_dir_path in $(ls -d $PHYS_ROOT/*/ 2>/dev/null); do
               sub_dir=$(basename "$sub_dir_path")
-              dest_dir="public/releases/packages-$ver/$sub_dir"
+              dest_dir="$GITHUB_WORKSPACE/public/releases/packages-$ver/$sub_dir"
               mkdir -p "$dest_dir"
               rsync -rlptD "$sub_dir_path/" "$dest_dir/"
               
+              # 确定包所在的物理目录 (luci根目录 或 arch/packages)
               target_pkg_dir="$dest_dir"
               [ -d "$dest_dir/packages" ] && target_pkg_dir="$dest_dir/packages"
 
               (
                 cd "$target_pkg_dir"
+                # 使用验证过的判断
                 if [ "$(ls -A *.apk *.ipk 2>/dev/null)" ]; then
                   echo "📝 Indexing Physical Feed: $ver/$sub_dir"
                   if [[ "$ver" == "25.12" ]]; then
@@ -91,42 +93,50 @@ jobs:
                     usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
                     gzip -9nc Packages > Packages.gz
                   fi
-                  # 物理目录生成原始 index.json
+                  # 物理目录生成 index.json
                   python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$sub_dir"
                 fi
               )
             done
           done
 
-          # === 第二阶段：影子目录 (仅链接包和索引，重写 index.json) ===
+          # === 第二阶段：影子目录处理 (解决 *.apk 链接失效问题) ===
           for ver in "24.10" "25.12"; do
-            VER_PUB="public/releases/packages-$ver"
+            VER_PUB="$GITHUB_WORKSPACE/public/releases/packages-$ver"
             [ ! -d "$VER_PUB" ] && continue
             
+            # 遍历所有硬件架构目录 (如 x86_64)
             for arch_path in $(ls -d $VER_PUB/*/ 2>/dev/null); do
               arch=$(basename "$arch_path")
               [[ "$arch" == "luci" || "$arch" == "common" ]] && continue
               
               for group in "luci" "common"; do
-                phys_dir="$VER_PUB/$group"
-                [ ! -d "$phys_dir" ] && continue
+                phys_dir_abs="$VER_PUB/$group"
+                [ ! -d "$phys_dir_abs" ] && continue
                 
                 shadow_dir="$VER_PUB/$arch/$group"
                 mkdir -p "$shadow_dir"
                 
-                echo "🔗 Linking $group assets into $arch shadow directory"
-                # 1. 链接包文件 (*.ipk / *.apk)
-                ln -snf "../../$group"/*.{ipk,apk} "$shadow_dir/" 2>/dev/null || true
+                echo "🔗 Linking physical files from $group to $arch shadow"
                 
-                # 2. 关键：链接已生成的索引和签名文件 (不再重复做索引动作)
-                # 这样 opkg/apk 就能找到这些文件，且内容与主仓库一致
-                ln -snf "../../$group"/Packages* "$shadow_dir/" 2>/dev/null || true
-                ln -snf "../../$group"/packages.adb* "$shadow_dir/" 2>/dev/null || true
-                
-                # 3. 唯一需要“重做”的：生成架构特定的 index.json
+                # 进入物理目录获取真实文件名，避免通配符展开失败
+                (
+                  cd "$phys_dir_abs"
+                  # 获取所有存在的文件
+                  valid_files=$(ls *.ipk *.apk Packages* packages.adb* 2>/dev/null || true)
+                  
+                  for f in $valid_files; do
+                    # 建立相对软链接
+                    # 路径：packages-24.10/x86_64/luci/a.ipk -> ../../luci/a.ipk
+                    ln -snf "../../$group/$f" "$shadow_dir/$f"
+                  done
+                )
+
+                # 生成架构特定的 index.json
                 (
                   cd "$shadow_dir"
-                  if [ "$(ls -L -A *.apk *.ipk 2>/dev/null)" ]; then
+                  # 检查是否有通过链接进来的包文件
+                  if [ "$(ls -A 2>/dev/null)" ]; then
                     echo "📝 Generating specialized index.json for $arch/$group"
                     python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$arch"
                   fi
@@ -135,17 +145,16 @@ jobs:
             done
           done
 
-          # === 第三阶段：收尾 (保持原样) ===
-          cd public/releases
+          # === 第三阶段：别名与映射收尾 ===
+          cd "$GITHUB_WORKSPACE/public/releases"
           ln -snf packages-24.10 packages-24.10.5
           ln -snf packages-25.12 packages-25.12.0
           mkdir -p 24.10.5 25.12.0
           ln -snf ../packages-24.10 24.10.5/packages
           ln -snf ../packages-25.12 25.12.0/packages
           
-          cd ../..
-          echo "✅ Optimized process finished."
-          mkdir -p .stfolder
+          echo "✅ All feeds processed successfully."
+          mkdir -p $GITHUB_WORKSPACE/.stfolder
 
       - name: Sync feeds to self-hosted server
         env:
