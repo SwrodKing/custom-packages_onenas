@@ -58,13 +58,13 @@ jobs:
           echo "${{ secrets.FEED_SIGNING_KEY }}" | base64 -d > key-build
           chmod 600 key-build
           
-      - name: 📦 Process Feeds (Shadow Indexing Strategy)
+      - name: 📦 Process Feeds (Shadow Indexing Strategy - Fixed)
         run: |
           set -e
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
           mkdir -p public/releases
 
-          # === 第一阶段：物理同步主仓库 (luci/common) 并生成全局索引 ===
+          # === 第一阶段：物理同步主仓库 (luci/common) ===
           for ver in "24.10" "25.12"; do
             [ ! -d "releases/packages-$ver" ] && continue
             for group in "luci" "common"; do
@@ -78,7 +78,8 @@ jobs:
               
               (
                 cd "$dest_dir"
-                if [ "$(ls -A *.apk *.ipk 2>/dev/null)" ]; then
+                # 检查是否有 ipk 或 apk 文件
+                if ls *.ipk *.apk >/dev/null 2>&1; then
                   if [[ "$ver" == "25.12" ]]; then
                     apk mkndx --allow-untrusted --output packages.adb *.apk
                     usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
@@ -88,7 +89,6 @@ jobs:
                     usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
                     gzip -9nc Packages > Packages.gz
                   fi
-                  # 生成通用的 index.json
                   python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$group"
                 fi
               )
@@ -104,38 +104,16 @@ jobs:
               arch=$(basename "$arch_path")
               [[ "$arch" == "luci" || "$arch" == "common" ]] && continue
               
-              echo "🏗️  Processing Architecture: $arch ($ver)"
+              echo "🏗️ Processing Architecture: $arch ($ver)"
               
-              # A. 处理架构原生 packages 目录
+              # A. 架构原生 packages
               arch_dest="public/releases/packages-$ver/$arch/packages"
               mkdir -p "$arch_dest"
-              rsync -rlptD "$arch_path/packages/" "$arch_dest/"
-              (
-                cd "$arch_dest"
-                if [[ "$ver" == "25.12" ]]; then
-                  apk mkndx --allow-untrusted --output packages.adb *.apk
-                  usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
-                else
-                  $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
-                  usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
-                  gzip -9nc Packages > Packages.gz
-                fi
-                python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$arch"
-              )
-
-              # B. 处理架构下的 luci/common 影子目录 (解决你发现的架构一致性问题)
-              for group in "luci" "common"; do
-                shadow_dir="public/releases/packages-$ver/$arch/$group"
-                mkdir -p "$shadow_dir"
-                
-                # 关键：包文件采用软链接指向顶级目录，保持物理只有一份
-                echo "🔗 Linking $group packages for $arch"
-                ln -snf "../../$group"/*.{apk,ipk} "$shadow_dir/" 2>/dev/null || true
-                
-                # 关键：在该目录下生成标明为 $arch 的独立索引
+              if [ -d "$arch_path/packages" ]; then
+                rsync -rlptD "$arch_path/packages/" "$arch_dest/"
                 (
-                  cd "$shadow_dir"
-                  if [ "$(ls -A 2>/dev/null)" ]; then
+                  cd "$arch_dest"
+                  if ls *.ipk *.apk >/dev/null 2>&1; then
                     if [[ "$ver" == "25.12" ]]; then
                       apk mkndx --allow-untrusted --output packages.adb *.apk
                       usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
@@ -144,7 +122,38 @@ jobs:
                       usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
                       gzip -9nc Packages > Packages.gz
                     fi
-                    # 调用 Python，架构名传入真实的 $arch
+                    python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$arch"
+                  fi
+                )
+              fi
+
+              # B. 影子目录 (luci/common)
+              for group in "luci" "common"; do
+                global_dir="../../$group"
+                shadow_dir="public/releases/packages-$ver/$arch/$group"
+                
+                # 如果顶级对应的物理目录不存在，跳过
+                [ ! -d "public/releases/packages-$ver/$group" ] && continue
+                
+                mkdir -p "$shadow_dir"
+                echo "🔗 Linking $group packages for $arch via cp -as"
+                
+                # 核心修正：使用 cp -as 创建软链接镜像，避免通配符报错
+                # 这会将 ../../luci/ 下的所有文件在 shadow_dir 下建立同名软链接
+                cp -as "$(realpath --relative-to="$shadow_dir" "public/releases/packages-$ver/$group")"/* "$shadow_dir/" 2>/dev/null || true
+                
+                (
+                  cd "$shadow_dir"
+                  # 再次确认链接是否成功建立
+                  if ls *.ipk *.apk >/dev/null 2>&1; then
+                    if [[ "$ver" == "25.12" ]]; then
+                      apk mkndx --allow-untrusted --output packages.adb *.apk
+                      usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
+                    else
+                      $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
+                      usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
+                      gzip -9nc Packages > Packages.gz
+                    fi
                     python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$arch"
                   fi
                 )
@@ -152,7 +161,7 @@ jobs:
             done
           done
 
-          # === 第三阶段：版本别名与路由器路径 ===
+          # === 第三阶段：别名与映射 ===
           cd public/releases
           ln -snf packages-24.10 packages-24.10.5
           ln -snf packages-25.12 packages-25.12.0
@@ -161,7 +170,7 @@ jobs:
           ln -snf ../packages-25.12 25.12.0/packages
           
           cd ../..
-          echo "✅ All feeds processed with architecture-specific indexing."
+          echo "✅ Process finished successfully."
           mkdir -p .stfolder
 
       - name: Sync feeds to self-hosted server
