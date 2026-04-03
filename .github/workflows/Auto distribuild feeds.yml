@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - Jackie264-patch-1
     paths:
       - '**/*.ipk'
       - '**/*.apk'
@@ -23,34 +22,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-#      - name: Cache build tools
-#        id: cache-tools
-#        uses: actions/cache@v5
-#        with:
-#          path: |
-#            /usr/local/bin/usign
-#            /usr/local/bin/apk
-#            /usr/local/lib/libapk.so*
-#          key: tools-v2512-${{ runner.os }}
-
       - name: Build and Install Tools (usign & apk-tools)
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git libssl-dev zlib1g-dev libzstd-dev lua5.3 liblua5.3-dev pkg-config scdoc
           git clone https://git.openwrt.org/project/usign.git
           rm -rf usign apk-tools
-          # 编译 usign
           git clone --depth 1 https://git.openwrt.org/project/usign.git
           cd usign && cmake . && make && sudo cp usign /usr/local/bin/ && cd ..
           
-          # 编译 apk-tools v3 (静态链接以避免库文件路径问题)
           git clone --depth 1 https://gitlab.alpinelinux.org/alpine/apk-tools.git
           cd apk-tools
           make
           sudo make install
           cd ..
           
-          # 3. 刷新动态库缓存
           sudo ldconfig
 
       - name: Restore signing key
@@ -58,54 +44,82 @@ jobs:
           echo "${{ secrets.FEED_SIGNING_KEY }}" | base64 -d > key-build
           chmod 600 key-build
           
-      - name: 📦 Process Feeds (Final Corrected Structure)
+      - name: 📦 Process Feeds (Strict Version/Extension Filtering)
         run: |
           set -e
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
           mkdir -p public/releases
 
-          # === 第一阶段：物理同步并生成“原始”索引 (luci, common, arch/packages) ===
+          # === 第一阶段：物理同步并生成“原始”索引 ===
           for ver in "24.10" "25.12"; do
             PHYS_ROOT="releases/packages-$ver"
             [ ! -d "$PHYS_ROOT" ] && continue
             
+            # 设置该版本合法的后缀
+            if [[ "$ver" == "25.12" ]]; then
+              VALID_EXT="*.apk"
+            else
+              VALID_EXT="*.ipk"
+            fi
+
             for sub_dir_path in $(ls -d $PHYS_ROOT/*/ 2>/dev/null); do
               sub_dir=$(basename "$sub_dir_path")
               dest_dir="$GITHUB_WORKSPACE/public/releases/packages-$ver/$sub_dir"
-              mkdir -p "$dest_dir"
-              rsync -rlptD "$sub_dir_path/" "$dest_dir/"
               
-              # 确定包所在的物理目录 (luci根目录 或 arch/packages)
-              target_pkg_dir="$dest_dir"
-              [ -d "$dest_dir/packages" ] && target_pkg_dir="$dest_dir/packages"
+              # 确定包所在的物理子目录 (处理架构目录下的 packages 子目录)
+              pkg_src_dir="$sub_dir_path"
+              [ -d "$sub_dir_path/packages" ] && pkg_src_dir="$sub_dir_path/packages"
 
-              (
-                cd "$target_pkg_dir"
-                # 使用验证过的判断
-                if [ "$(ls -A *.apk *.ipk 2>/dev/null)" ]; then
+              # 核心修正：仅当目录下存在该版本合法的后缀文件时才进行同步和索引
+              if [ "$(ls -A $pkg_src_dir/$VALID_EXT 2>/dev/null)" ]; then
+                echo "📂 Processing $ver Feed: $sub_dir (Strict Match: $VALID_EXT)"
+                mkdir -p "$dest_dir"
+                # 如果有 packages 子目录，rsync 目标也要对应
+                if [ -d "$sub_dir_path/packages" ]; then
+                  mkdir -p "$dest_dir/packages"
+                  rsync -rlptD "$sub_dir_path/packages/" "$dest_dir/packages/"
+                  target_pkg_dir="$dest_dir/packages"
+                else
+                  rsync -rlptD "$sub_dir_path/" "$dest_dir/"
+                  target_pkg_dir="$dest_dir"
+                fi
+
+                (
+                  cd "$target_pkg_dir"
                   echo "📝 Indexing Physical Feed: $ver/$sub_dir"
                   if [[ "$ver" == "25.12" ]]; then
+                    # 25.12 严格只索引 apk
                     apk mkndx --allow-untrusted --output packages.adb *.apk
                     usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
                   else
+                    # 24.10 严格只索引 ipk
                     chmod +x $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh
                     $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
                     usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
                     gzip -9nc Packages > Packages.gz
                   fi
-                  # 物理目录生成 index.json
                   python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$sub_dir"
-                fi
-              )
+                )
+              else
+                echo "⏭️ Skipping $sub_dir in $ver: No $VALID_EXT files found."
+              fi
             done
           done
 
-          # === 第二阶段：影子目录处理 (解决 *.apk 链接失效问题) ===
+          # === 第二阶段：影子目录处理 ===
           for ver in "24.10" "25.12"; do
             VER_PUB="$GITHUB_WORKSPACE/public/releases/packages-$ver"
             [ ! -d "$VER_PUB" ] && continue
             
-            # 遍历所有硬件架构目录 (如 x86_64)
+            # 设置合法的后缀和索引文件名
+            if [[ "$ver" == "25.12" ]]; then
+              EXT_PATTERN="*.apk"
+              IDX_PATTERN="packages.adb*"
+            else
+              EXT_PATTERN="*.ipk"
+              IDX_PATTERN="Packages*"
+            fi
+
             for arch_path in $(ls -d $VER_PUB/*/ 2>/dev/null); do
               arch=$(basename "$arch_path")
               [[ "$arch" == "luci" || "$arch" == "common" ]] && continue
@@ -117,27 +131,19 @@ jobs:
                 shadow_dir="$VER_PUB/$arch/$group"
                 mkdir -p "$shadow_dir"
                 
-                echo "🔗 Linking physical files from $group to $arch shadow"
-                
-                # 进入物理目录获取真实文件名，避免通配符展开失败
                 (
                   cd "$phys_dir_abs"
-                  # 获取所有存在的文件
-                  valid_files=$(ls *.ipk *.apk Packages* packages.adb* 2>/dev/null || true)
+                  # 仅链接当前版本合法的包和索引文件
+                  valid_files=$(ls $EXT_PATTERN $IDX_PATTERN 2>/dev/null || true)
                   
-                  for f in $valid_files; do
-                    # 建立相对软链接
-                    # 路径：packages-24.10/x86_64/luci/a.ipk -> ../../luci/a.ipk
-                    ln -snf "../../$group/$f" "$shadow_dir/$f"
-                  done
-                )
-
-                # 生成架构特定的 index.json
-                (
-                  cd "$shadow_dir"
-                  # 检查是否有通过链接进来的包文件
-                  if [ "$(ls -A 2>/dev/null)" ]; then
-                    echo "📝 Generating specialized index.json for $arch/$group"
+                  if [ -n "$valid_files" ]; then
+                    echo "🔗 Linking $group -> $arch ($ver)"
+                    for f in $valid_files; do
+                      ln -snf "../../$group/$f" "$shadow_dir/$f"
+                    done
+                    
+                    # 生成影子 index.json
+                    cd "$shadow_dir"
                     python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$arch"
                   fi
                 )
@@ -145,7 +151,7 @@ jobs:
             done
           done
 
-          # === 第三阶段：别名与映射收尾 ===
+          # === 第三阶段：收尾 ===
           cd "$GITHUB_WORKSPACE/public/releases"
           ln -snf packages-24.10 packages-24.10.5
           ln -snf packages-25.12 packages-25.12.0
