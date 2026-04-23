@@ -43,7 +43,7 @@ jobs:
         run: |
           echo "${{ secrets.FEED_SIGNING_KEY }}" | base64 -d > key-build
           chmod 600 key-build
-          usign -G -p public-key-24.10.pub -s key-build
+          echo "${{ secrets.FEED_PUB_KEY }}" | base64 -d > public-key-24.10.pub
           echo "${{ secrets.APK_SIGNING_KEY }}" | base64 -d > key-apk.sec
           chmod 600 key-apk.sec
           openssl ec -in key-apk.sec -pubout > public-key-25.12.pem
