@@ -43,13 +43,22 @@ jobs:
         run: |
           echo "${{ secrets.FEED_SIGNING_KEY }}" | base64 -d > key-build
           chmod 600 key-build
-          
-      - name: 📦 Process Feeds (Strict Version/Extension Filtering)
+          usign -G -p public-key-24.10.pub -s key-build
+          echo "${{ secrets.APK_SIGNING_KEY }}" | base64 -d > key-apk.sec
+          chmod 600 key-apk.sec
+          openssl ec -in key-apk.sec -pubout > public-key-25.12.pem
+
+      - name: 📦 Process Feeds (Official Standards Alignment)
         run: |
           set -e
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
           mkdir -p public/releases
 
+          # 设置脚本路径
+          MAKE_INDEX_PY="$GITHUB_WORKSPACE/scripts/make-index-json.py"
+          IPK_MAKE_INDEX="$GITHUB_WORKSPACE/scripts/ipkg-make-index.sh"
+          chmod +x "$IPK_MAKE_INDEX" "$MAKE_INDEX_PY"
+          
           # === 第一阶段：物理同步并生成“原始”索引 ===
           for ver in "24.10" "25.12"; do
             PHYS_ROOT="releases/packages-$ver"
@@ -88,17 +97,30 @@ jobs:
                   cd "$target_pkg_dir"
                   echo "📝 Indexing Physical Feed: $ver/$sub_dir"
                   if [[ "$ver" == "25.12" ]]; then
-                    # 25.12 严格只索引 apk
-                    apk mkndx --allow-untrusted --output packages.adb *.apk
-                    usign -S -m packages.adb -s $GITHUB_WORKSPACE/key-build -x packages.adb.asc
+                    # --- [25.12 正规化] APK 流程：内嵌 ECDSA 签名 ---
+                    echo "✍️ Signing APK feed for $sub_dir with ECDSA"
+                    apk mkndx --allow-untrusted \
+                        --sign "$GITHUB_WORKSPACE/key-apk.sec" \
+                        --output packages.adb *.apk
+                    
+                    # 生成官方 JSON
+                    apk adbdump --format json packages.adb | python3 "$MAKE_INDEX_PY" -f apk -a "$sub_dir" - > index.json
                   else
-                    # 24.10 严格只索引 ipk
-                    chmod +x $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh
-                    $GITHUB_WORKSPACE/scripts/ipkg-make-index.sh . > Packages
-                    usign -S -m Packages -s $GITHUB_WORKSPACE/key-build -x Packages.sig
+                    # --- [24.10 正规化] IPK 流程：外部 usign 签名 ---
+                    echo "✍️ Signing IPK feed for $sub_dir with usign"
+                    "$IPK_MAKE_INDEX" . 2>&1 > Packages.manifest
+                    grep -vE '^(Maintainer|LicenseFiles|Source|SourceName|Require|SourceDateEpoch)' Packages.manifest > Packages
+                    
+                    # Usign 补丁
+                    case "$(((64 + $(stat -L -c%s Packages)) % 128))" in 110|111)
+                      echo "" >> Packages; echo "" >> Packages
+                      ;;
+                    esac
+                    
+                    usign -S -m Packages -s "$GITHUB_WORKSPACE/key-build" -x Packages.sig
                     gzip -9nc Packages > Packages.gz
+                    python3 "$MAKE_INDEX_PY" -f opkg -a "$sub_dir" Packages > index.json
                   fi
-                  python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$sub_dir"
                 )
               else
                 echo "⏭️ Skipping $sub_dir in $ver: No $VALID_EXT files found."
@@ -127,7 +149,6 @@ jobs:
               for group in "luci" "common"; do
                 phys_dir_abs="$VER_PUB/$group"
                 [ ! -d "$phys_dir_abs" ] && continue
-                
                 shadow_dir="$VER_PUB/$arch/$group"
                 mkdir -p "$shadow_dir"
                 
@@ -144,7 +165,11 @@ jobs:
                     
                     # 生成影子 index.json
                     cd "$shadow_dir"
-                    python3 $GITHUB_WORKSPACE/scripts/generate_index.py "." "$arch"
+                    if [[ "$ver" == "25.12" ]]; then
+                      apk adbdump --format json packages.adb | python3 "$MAKE_INDEX_PY" -f apk -a "$arch" - > index.json
+                    else
+                      python3 "$MAKE_INDEX_PY" -f opkg -a "$arch" Packages > index.json
+                    fi
                   fi
                 )
               done
@@ -152,12 +177,14 @@ jobs:
           done
 
           # === 第三阶段：收尾 ===
+          cp "$GITHUB_WORKSPACE/public-key-24.10.pub" "$GITHUB_WORKSPACE/public/releases/packages-24.10/key.pub"
+          cp "$GITHUB_WORKSPACE/public-key-25.12.pem" "$GITHUB_WORKSPACE/public/releases/packages-25.12/key.pem"
           cd "$GITHUB_WORKSPACE/public/releases"
           ln -snf packages-24.10 packages-24.10.5
-          ln -snf packages-25.12 packages-25.12.0
-          mkdir -p 24.10.5 25.12.0
+          ln -snf packages-25.12 packages-25.12.2
+          mkdir -p 24.10.5 25.12.2
           ln -snf ../packages-24.10 24.10.5/packages
-          ln -snf ../packages-25.12 25.12.0/packages
+          ln -snf ../packages-25.12 25.12.2/packages
           
           echo "✅ All feeds processed successfully."
           mkdir -p $GITHUB_WORKSPACE/.stfolder
