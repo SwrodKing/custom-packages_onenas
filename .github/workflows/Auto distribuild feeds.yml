@@ -5,7 +5,6 @@ on:
     branches:
       - main
     paths:
-      - '**/*.ipk'
       - '**/*.apk'
   workflow_dispatch:
 
@@ -26,14 +25,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git libssl-dev zlib1g-dev libzstd-dev lua5.3 liblua5.3-dev pkg-config scdoc meson ninja-build
-          rm -rf usign apk-tools
-          
-          git clone --depth 1 https://git.openwrt.org/project/usign.git
-          cd usign
-          cmake .
-          make
-          sudo cp usign /usr/local/bin/
-          cd ..
           
           git clone -b master https://gitlab.alpinelinux.org/alpine/apk-tools.git
           cd apk-tools
@@ -46,12 +37,7 @@ jobs:
 
       - name: Restore signing key
         run: |
-          echo "${{ secrets.FEED_SIGNING_KEY }}" | base64 -d > key-build
-          chmod 600 key-build
-          echo "${{ secrets.FEED_PUB_KEY }}" | base64 -d > temp_key.pub
-          FINGERPRINT=$(usign -F -p temp_key.pub)
-          mv temp_key.pub "$FINGERPRINT"
-          echo "OPKG_KEY_NAME=$FINGERPRINT" >> $GITHUB_ENV
+          # 设置 APK 签名密钥
           echo "${{ secrets.APK_SIGNING_KEY }}" | base64 -d > key-apk.sec
           chmod 600 key-apk.sec
           openssl ec -in key-apk.sec -pubout > public-key-25.12.pem
@@ -62,142 +48,87 @@ jobs:
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
           mkdir -p public/releases
 
-          # 设置脚本路径
           MAKE_INDEX_PY="$GITHUB_WORKSPACE/scripts/make-index-json.py"
-          IPK_MAKE_INDEX="$GITHUB_WORKSPACE/scripts/ipkg-make-index.sh"
-          chmod +x "$IPK_MAKE_INDEX" "$MAKE_INDEX_PY"
+          chmod +x "$MAKE_INDEX_PY"
           
-          # === 第一阶段：物理同步并生成“原始”索引 ===
-          for ver in "24.10" "25.12"; do
-            PHYS_ROOT="releases/packages-$ver"
-            [ ! -d "$PHYS_ROOT" ] && continue
+          ver="25.12"
+          PHYS_ROOT="releases/packages-$ver"
+          [ ! -d "$PHYS_ROOT" ] && exit 0
+          
+          VALID_EXT="*.apk"
+
+          # === 第一阶段：物理同步并生成索引 ===
+          for sub_dir_path in $(ls -d $PHYS_ROOT/*/ 2>/dev/null); do
+            sub_dir=$(basename "$sub_dir_path")
+            dest_dir="$GITHUB_WORKSPACE/public/releases/packages-$ver/$sub_dir"
             
-            # 设置该版本合法的后缀
-            if [[ "$ver" == "25.12" ]]; then
-              VALID_EXT="*.apk"
-            else
-              VALID_EXT="*.ipk"
-            fi
+            pkg_src_dir="$sub_dir_path"
+            [ -d "$sub_dir_path/packages" ] && pkg_src_dir="$sub_dir_path/packages"
 
-            for sub_dir_path in $(ls -d $PHYS_ROOT/*/ 2>/dev/null); do
-              sub_dir=$(basename "$sub_dir_path")
-              dest_dir="$GITHUB_WORKSPACE/public/releases/packages-$ver/$sub_dir"
+            if [ "$(ls -A $pkg_src_dir/$VALID_EXT 2>/dev/null)" ]; then
+              echo "📂 Processing 25.12 Feed: $sub_dir"
+              mkdir -p "$dest_dir"
               
-              # 确定包所在的物理子目录 (处理架构目录下的 packages 子目录)
-              pkg_src_dir="$sub_dir_path"
-              [ -d "$sub_dir_path/packages" ] && pkg_src_dir="$sub_dir_path/packages"
-
-              # 核心修正：仅当目录下存在该版本合法的后缀文件时才进行同步和索引
-              if [ "$(ls -A $pkg_src_dir/$VALID_EXT 2>/dev/null)" ]; then
-                echo "📂 Processing $ver Feed: $sub_dir (Strict Match: $VALID_EXT)"
-                mkdir -p "$dest_dir"
-                # 如果有 packages 子目录，rsync 目标也要对应
-                if [ -d "$sub_dir_path/packages" ]; then
-                  mkdir -p "$dest_dir/packages"
-                  rsync -rlptD "$sub_dir_path/packages/" "$dest_dir/packages/"
-                  target_pkg_dir="$dest_dir/packages"
-                else
-                  rsync -rlptD "$sub_dir_path/" "$dest_dir/"
-                  target_pkg_dir="$dest_dir"
-                fi
-
-                (
-                  cd "$target_pkg_dir"
-                  echo "📝 Indexing Physical Feed: $ver/$sub_dir"
-                  if [[ "$ver" == "25.12" ]]; then
-                    # --- [25.12 正规化] APK 流程：内嵌 ECDSA 签名 ---
-                    echo "✍️ Signing APK feed for $sub_dir with ECDSA"
-                    apk mkndx --allow-untrusted \
-                        --sign "$GITHUB_WORKSPACE/key-apk.sec" \
-                        --output packages.adb *.apk
-                    
-                    # 生成官方 JSON
-                    apk adbdump --format json packages.adb | python3 "$MAKE_INDEX_PY" -f apk -a "$sub_dir" - > index.json
-                  else
-                    # --- [24.10 正规化] IPK 流程：外部 usign 签名 ---
-                    echo "✍️ Signing IPK feed for $sub_dir with usign"
-                    "$IPK_MAKE_INDEX" . 2>&1 > Packages.manifest
-                    grep -vE '^(Maintainer|LicenseFiles|Source|SourceName|Require|SourceDateEpoch)' Packages.manifest > Packages
-                    
-                    # Usign 补丁
-                    case "$(((64 + $(stat -L -c%s Packages)) % 128))" in 110|111)
-                      echo "" >> Packages; echo "" >> Packages
-                      ;;
-                    esac
-                    
-                    usign -S -m Packages -s "$GITHUB_WORKSPACE/key-build" -x Packages.sig
-                    gzip -9nc Packages > Packages.gz
-                    python3 "$MAKE_INDEX_PY" -f opkg -a "$sub_dir" Packages > index.json
-                  fi
-                )
+              if [ -d "$sub_dir_path/packages" ]; then
+                mkdir -p "$dest_dir/packages"
+                rsync -rlptD "$sub_dir_path/packages/" "$dest_dir/packages/"
+                target_pkg_dir="$dest_dir/packages"
               else
-                echo "⏭️ Skipping $sub_dir in $ver: No $VALID_EXT files found."
+                rsync -rlptD "$sub_dir_path/" "$dest_dir/"
+                target_pkg_dir="$dest_dir"
               fi
-            done
+
+              (
+                cd "$target_pkg_dir"
+                echo "✍️ Signing APK feed for $sub_dir with ECDSA"
+                apk mkndx --allow-untrusted \
+                  --sign "$GITHUB_WORKSPACE/key-apk.sec" \
+                  --output packages.adb *.apk
+                
+                # 生成官方 JSON
+                apk adbdump --format json packages.adb | python3 "$MAKE_INDEX_PY" -f apk -a "$sub_dir" - > index.json
+              )
+            else
+              echo "⏭️ Skipping $sub_dir: No APK files found."
+            fi
           done
 
           # === 第二阶段：影子目录处理 ===
-          for ver in "24.10" "25.12"; do
-            VER_PUB="$GITHUB_WORKSPACE/public/releases/packages-$ver"
-            [ ! -d "$VER_PUB" ] && continue
+          VER_PUB="$GITHUB_WORKSPACE/public/releases/packages-$ver"
+          for arch_path in $(ls -d $VER_PUB/*/ 2>/dev/null); do
+            arch=$(basename "$arch_path")
+            [[ "$arch" == "luci" || "$arch" == "common" ]] && continue
             
-            # 设置合法的后缀和索引文件名
-            if [[ "$ver" == "25.12" ]]; then
-              EXT_PATTERN="*.apk"
-              IDX_PATTERN="packages.adb*"
-            else
-              EXT_PATTERN="*.ipk"
-              IDX_PATTERN="Packages*"
-            fi
-
-            for arch_path in $(ls -d $VER_PUB/*/ 2>/dev/null); do
-              arch=$(basename "$arch_path")
-              [[ "$arch" == "luci" || "$arch" == "common" ]] && continue
+            for group in "luci" "common"; do
+              phys_dir_abs="$VER_PUB/$group"
+              [ ! -d "$phys_dir_abs" ] && continue
+              shadow_dir="$VER_PUB/$arch/$group"
+              mkdir -p "$shadow_dir"
               
-              for group in "luci" "common"; do
-                phys_dir_abs="$VER_PUB/$group"
-                [ ! -d "$phys_dir_abs" ] && continue
-                shadow_dir="$VER_PUB/$arch/$group"
-                mkdir -p "$shadow_dir"
+              (
+                cd "$phys_dir_abs"
+                valid_files=$(ls *.apk packages.adb* 2>/dev/null || true)
                 
-                (
-                  cd "$phys_dir_abs"
-                  # 仅链接当前版本合法的包和索引文件
-                  valid_files=$(ls $EXT_PATTERN $IDX_PATTERN 2>/dev/null || true)
+                if [ -n "$valid_files" ]; then
+                  echo "🔗 Linking $group -> $arch (25.12)"
+                  for f in $valid_files; do
+                    ln -snf "../../$group/$f" "$shadow_dir/$f"
+                  done
                   
-                  if [ -n "$valid_files" ]; then
-                    echo "🔗 Linking $group -> $arch ($ver)"
-                    for f in $valid_files; do
-                      ln -snf "../../$group/$f" "$shadow_dir/$f"
-                    done
-                    
-                    # 生成影子 index.json
-                    cd "$shadow_dir"
-                    if [[ "$ver" == "25.12" ]]; then
-                      apk adbdump --format json packages.adb | python3 "$MAKE_INDEX_PY" -f apk -a "$arch" - > index.json
-                    else
-                      python3 "$MAKE_INDEX_PY" -f opkg -a "$arch" Packages > index.json
-                    fi
-                  fi
-                )
-              done
+                  cd "$shadow_dir"
+                  apk adbdump --format json packages.adb | python3 "$MAKE_INDEX_PY" -f apk -a "$arch" - > index.json
+                fi
+              )
             done
           done
 
-          # === 第三阶段：收尾 ===
-          cp "$GITHUB_WORKSPACE/${{ env.OPKG_KEY_NAME }}" "$GITHUB_WORKSPACE/public/releases/packages-24.10/"
+          # === 第三阶段：收尾 (25.12 专属) ===
           cp "$GITHUB_WORKSPACE/public-key-25.12.pem" "$GITHUB_WORKSPACE/public/releases/packages-25.12/key.pem"
           cd "$GITHUB_WORKSPACE/public/releases"
-          ln -snf packages-24.10 packages-24.10.5
-          ln -snf packages-24.10 packages-24.10.6
-          ln -snf packages-24.10 packages-24.10.7
           ln -snf packages-25.12 packages-25.12.2
           ln -snf packages-25.12 packages-25.12.3
           ln -snf packages-25.12 packages-25.12.4
-          mkdir -p 24.10.5 24.10.6 24.10.7 25.12.2 25.12.3 25.12.4
-          ln -snf ../packages-24.10 24.10.5/packages
-          ln -snf ../packages-24.10 24.10.6/packages
-          ln -snf ../packages-24.10 24.10.7/packages
+          mkdir -p 25.12.2 25.12.3 25.12.4
           ln -snf ../packages-25.12 25.12.2/packages
           ln -snf ../packages-25.12 25.12.3/packages
           ln -snf ../packages-25.12 25.12.4/packages
@@ -217,12 +148,7 @@ jobs:
           echo "$DEPLOY_KEY" | base64 -d > deploy_key
           chmod 600 deploy_key
           ssh -i deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $RSYNC_PORT \
-            ${DEPLOY_USER}@${DEPLOY_SERVER} "whoami && pwd && ls -ld ${DEPLOY_PATH} || echo 'DEPLOY_PATH not found'"
-          ssh -i deploy_key \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              -p $RSYNC_PORT \
-              ${DEPLOY_USER}@${DEPLOY_SERVER} "mkdir -vp ${DEPLOY_PATH}/.stfolder"
+            ${DEPLOY_USER}@${DEPLOY_SERVER} "mkdir -vp ${DEPLOY_PATH}/.stfolder"
           rsync $RSYNC_OPTS --exclude '.stfolder' \
             -e "ssh -i deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $RSYNC_PORT" \
             public/ ${DEPLOY_USER}@${DEPLOY_SERVER}:${DEPLOY_PATH}/
